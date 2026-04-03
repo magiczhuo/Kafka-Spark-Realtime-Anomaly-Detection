@@ -11,7 +11,7 @@ This project demonstrates a real-time network traffic anomaly detection system l
    - Extracts absolute event-time from JSON payloads.
    - **Sliding Window:** Groups traffic into 10-second windows shifting every 2 seconds (window(col(''timestamp''), ''10 seconds'', ''2 seconds'')).
    - **Watermark Protection:** Uses a 30-second watermark (WATERMARK_DELAY = ''30 seconds'') to gracefully accommodate network delays without dropping late-arriving events prematurely.
-   - **Sink Persistence:** Saves the micro-batch aggregated states cross-process safely into a local SQLite database (metrics.db) via the native foreachBatch operation.
+   - **Sink Persistence:** Saves the micro-batch aggregated states cross-process safely into a local SQLite database (metrics.db) via the native foreachBatch operation.
 4. **Real-Time Dashboard (dashboard.py)**:
    - A reactive Streamlit application polling SQLite dynamically.
    - Instead of checking only the volatile active micro-batch, it evaluates anomaly thresholds by reviewing the peak volume uniformly across the **last 3 valid sliding windows** (ALERT_LOOKBACK_WINDOWS = 3). 
