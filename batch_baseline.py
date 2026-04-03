@@ -1,7 +1,7 @@
 import time
 import os
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, window
+from pyspark.sql.functions import col, window, lit
 
 # 指向我们第一步清洗好的离线数据集
 DATA_FILE = os.path.abspath("data_preprocessed.jsonl")
@@ -33,6 +33,26 @@ def main():
     # 转换时间戳格式
     event_df = df.withColumn("timestamp", col("timestamp_iso").cast("timestamp"))
 
+    # [对照实验核心：混入异常数据]：动态插入500条异常攻击数据
+    # 这模拟了磁盘历史数据中，在某个特定时刻曾发生过一次 DDoS 攻击。
+    # 这里将攻击时间设为 2019-01-22 03:56:50，与原有日志的时间域对齐
+    print("正在向数据集中混入 500 条突发攻击记录，模拟离线日志中隐藏的攻击事实...")
+    attack_time = "2019-01-22 03:56:50.000"
+    attack_count = 500
+
+    # 使用 Spark JVM 侧生成数据，避免 Windows 下 Python worker 连接超时
+    attack_df = (
+        spark.range(attack_count)
+        .select(
+            lit(attack_time).alias("timestamp_iso"),
+            lit("/login-attack").alias("url"),
+        )
+    )
+    attack_event_df = attack_df.withColumn("timestamp", col("timestamp_iso").cast("timestamp"))
+    
+    # 将异常攻击流合并到原始数据中一同参与离线长计算
+    event_df = event_df.unionByName(attack_event_df, allowMissingColumns=True)
+
     # 3. 业务过滤逻辑（与 Stream 完全保持一致）
     filtered_df = event_df.filter(col("url").isNotNull()) \
                           .filter(~col("url").like("%.png")) \
@@ -45,9 +65,17 @@ def main():
         .count() \
         .orderBy("window.start", ascending=True)
 
-    # 5. 触发 Action: 收集结果并打印前 20 条验证
-    print("开始执行全量 DAG 计算并收集结果...\n")
-    windowed_counts.show(100, truncate=False)
+    # [对照实验新增]：在离线批处理中找出异常流量窗口
+    THRESHOLD = 300
+    anomalies = windowed_counts.filter(col("count") > THRESHOLD)
+
+    # 5. 触发 Action: 收集结果并打印验证
+    print("开始执行全量 DAG 计算并检测异常...\n")
+    print(f"========== 离线检测到的异常流量窗口 (阈值 > {THRESHOLD}) ==========")
+    anomalies.show(truncate=False)
+    
+    print("========== 总体正常流量统计 (前20条) ==========")
+    windowed_counts.show(20, truncate=False)
 
     # 6. 计算端到端耗时
     end_time = time.time()

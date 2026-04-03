@@ -1,70 +1,74 @@
-# Real-Time Network Traffic Anomaly Detection
+# Real-Time Anomaly Detection Pipeline
 
-This project demonstrates an end-to-end real-time anomaly detection pipeline using PySpark Structured Streaming, Apache Kafka, and Streamlit. The system continuously ingests web server logs, aggregates traffic using sliding windows with watermark mechanisms, and flags abnormal bursts (e.g., DDoS attacks) on a live dashboard.
+This project demonstrates a real-time network traffic anomaly detection system leveraging PySpark Structured Streaming, Apache Kafka, and Streamlit. The pipeline ingests continuous web logs, computes traffic via sliding windows with watermarks, and triggers low-latency front-end alerts against DDoS-like burst access.
 
-## 🏗️ Architecture & Data Flow
+## 🏗️ Architecture & Workflow
 
-1. **Data Ingestion (`producer.py`)**: 
-   Reads preprocessed log data (JSON format) and continuously streams it into the Kafka topic `web-logs`. It also provides an interactive mechanism to manually inject massive burst traffic to simulate DDoS attacks.
-2. **Stream Processing (`spark_processor.py`)**:
-   Powered by PySpark Structured Streaming. It subscribes to the Kafka topic, extracts event timestamps, and performs windowed aggregations (traffic count per time window). To guarantee intra-process concurrency safety, aggregated results are written to a local SQLite database (`metrics.db`) via a custom `foreachBatch` sink.
-3. **Live Dashboard (`dashboard.py`)**:
-   Built with Streamlit and Plotly. It polls the SQLite database periodically to fetch the latest sliding windows and visualizes the traffic. If the traffic exceeds a specified threshold, the UI triggers a visual red alarm.
+1. **Data Preprocessing**: Raw server logs (e.g., ccess_10000.log) are cleaned and standardized into structured JSON formats (data_preprocessed.jsonl) for efficient consumption.
+2. **Kafka Ingestion (producer.py)**: Acts as the real-time event source. It continuously replays historical logs into the Kafka web-logs topic. Furthermore, it supports manual injections of burst traffic (e.g., 500 requests sharing an identical timestamp) to reliably simulate sudden DDoS attacks.
+3. **Stream Processing (spark_processor.py)**:
+   - Subscribes to the live Kafka stream.
+   - Extracts absolute event-time from JSON payloads.
+   - **Sliding Window:** Groups traffic into 10-second windows shifting every 2 seconds (window(col(''timestamp''), ''10 seconds'', ''2 seconds'')).
+   - **Watermark Protection:** Uses a 30-second watermark (WATERMARK_DELAY = ''30 seconds'') to gracefully accommodate network delays without dropping late-arriving events prematurely.
+   - **Sink Persistence:** Saves the micro-batch aggregated states cross-process safely into a local SQLite database (metrics.db) via the native oreachBatch operation.
+4. **Real-Time Dashboard (dashboard.py)**:
+   - A reactive Streamlit application polling SQLite dynamically.
+   - Instead of checking only the volatile active micro-batch, it evaluates anomaly thresholds by reviewing the peak volume uniformly across the **last 3 valid sliding windows** (ALERT_LOOKBACK_WINDOWS = 3). 
+   - If traffic exceeds the threshold (THRESHOLD = 300), the dashboard immediately turns red and raises a critical alarm.
 
-## 🛠️ Prerequisites & Setup
+## ⚙️ Environment Setup (Windows Version)
 
 Ensure the following dependencies are installed and correctly added to your system environment variables (especially for Windows):
-- **Python 3.8 - 3.10** (Managed via Conda, environment name: `base` or custom)
-- **Java 11 or 17** (`JAVA_HOME` configured)
+- **Python 3.11** (Managed via Conda, environment name: `base` or custom)
+- **Java 17** (`JAVA_HOME` configured)
 - **Hadoop Winutils** (`HADOOP_HOME` configured for PySpark on Windows)
 - **Apache Kafka & Zookeeper** (Running locally on `localhost:9092`)
-- Required Python Packages: `pyspark`, `kafka-python`, `streamlit`, `plotly`, `pandas`
+- Required Python Packages: `pyspark`, `kafka-python`, `streamlit`, `plotly`, `pandas`; Don't worry about the version conflict between pyspark and kafka, our code can automatically generate compatible Kafka connector coordinates based on the current PySpark version
 
-## 🚀 Execution & Usage
+---
+## 🔬 Baseline vs. Streaming (Experimental Evaluation)
 
-PowerShell automation scripts are provided to sequentialize the startup of the pipeline.
+To strictly measure and quantify the architectural improvement, we designed a **Batch Processing Baseline (batch_baseline.py)** reading strictly from disk (acting as HDFS/Hadoop storage). Below details the comparative scheme for both methodologies.
 
-**Important**: Make sure your local Kafka and Zookeeper servers are up and running before executing the scripts.
+### The Batch Baseline Scheme:
+- **Operation Format**: Reads the complete static JSON dataset (data_preprocessed.jsonl) entirely utilizing raw disk I/O.
+- **Anomaly Detection**: After mapping the data via .groupBy().count(), the system runs a .filter(col(''count'') > THRESHOLD) operation (e.g., >300) traversing the computed memory block to report any anomalous windows retroactively.
 
-### Option 1: Run the Optimized Pipeline (Latest Architecture)
-To run the state-of-the-art version which solves late-data-drop and async reading issues:
-```powershell
+### Direct Comparison & Streaming Advantages:
+1. **Detection Timeliness (Latency)**:
+   - *Batch Baseline*: The entire data chunk must accumulate, settle physically on disk, and undergo heavy map-reduce scanning. Anomalies are exposed strictly **Post-Mortem** (latency in minutes to hours).
+   - *Optimized Streaming (Kafka + Spark)*: Events calculate incrementally directly in memory (State Store). The anomaly triggers the Streamlit GUI dynamically within **Seconds** of the attack occurring.
+2. **Resource Footprint & I/O Overhead**:
+   - *Batch Baseline*: Scaling up the application implies mounting heavier data files sequentially, requiring tremendous parallel memory bounds creating high risks for JVM OutOfMemoryErrors.
+   - *Optimized Streaming (Kafka + Spark)*: Streams compute entirely locally avoiding extreme payload overheads. PySpark purges expired window aggregations once they cross the *30-second Watermark*, guaranteeing a **stable computing footprint indefinitely.**
+3. **Resilience to Late Data**:
+   - *Batch Baseline*: Trivializes the concept of late data logic, since all data is historically sorted during computation.
+   - *Optimized Streaming (Kafka + Spark)*: Models chaos by applying the 30-second Watermark, providing immense robustness handling un-sequenced logs due to arbitrary network topologies exactly dynamically.
+
+---
+## 🚀 How to Execute the Pipeline
+
+Executing raw .sh Linux scripts directly inside Windows triggers the unconfigured WSL module leading to No such file or directory faults. To seamlessly execute the multi-tiered architecture, we provide automated PowerShell orchestration scripts.
+
+> **IMPORTANT:** Confirm Zookeeper and Kafka are natively booted prior to launching!
+
+### Mode 1: Execute the Optimized Real-Time Pipeline
+`powershell
 .\test.ps1
-```
-*(This script spawns 3 separate PowerShell windows, activates the Conda `base` environment, and sequentially starts the Spark Processor, Kafka Producer, and the Headless Streamlit Dashboard on port 8501).*
+`
+*(The script will autonomously launch 3 individual PowerShell terminals, activating the Conda environment and running the respective Spark, Producer, and Dashboard instances safely.)*
 
-### Option 2: Run the Baseline Pipeline
-To run the initial/legacy version for A/B comparison and testing:
-```powershell
+### Mode 2: Verify against the Initial Benchmark
+`powershell
 .\test_init.ps1
-```
+`
 
-## 📊 Viewing the Dashboard & Simulating Attacks
+## ⏱️ Manual Reproduction & Simulating Attacks
 
-1. Open your browser and navigate to: `http://localhost:8501`
-2. You will see a dynamic line chart auto-scaling based on normal traffic.
-3. **Simulate an Attack**: Go to the newly opened terminal running `producer.py` and **press the `Enter` key**. 
-4. The terminal will log `[ATTACK] Injected 500 burst events`.
-5. Observe the Dashboard: The chart will spike dramatically, and the UI will trigger a red alert indicating an anomaly.
-
-## ⚙️ Key Parameters Explained
-
-The reliability of this stream processing architecture heavily relies on several crucial time and threshold parameters:
-
-### PySpark Processor Parameters (`spark_processor.py`)
-- `window("timestamp", "10 seconds", "2 seconds")`: 
-  **Sliding Window Logic**. Traffic is grouped into 10-second intervals, evaluated and shifted forward every 2 seconds. Thus, a single event contributes to 5 overlapping windows.
-- `WATERMARK_DELAY = "30 seconds"`: 
-  **Tolerance for Late Data**. Tells PySpark to maintain window states in memory for an extra 30 seconds. This prevents massive burst injections or network delays from being discarded as "late data".
-- `TRIGGER_INTERVAL = "5 seconds"`: 
-  The micro-batch physics execution rate. Spark evaluates the DAG and updates the SQLite DB every 5 seconds.
-
-### Dashboard & Alert Parameters (`dashboard.py`)
-- `THRESHOLD = 300`: 
-  The absolute traffic count. If any 10-second window exceeds 300 requests, it is flagged as anomalous.
-- `ALERT_LOOKBACK_WINDOWS = 3`: 
-  Instead of only querying the singular "latest" window (which might be partially computed due to Spark's async update mode), the dashboard scans the maximum traffic of the **3 most recent windows**. This completely eliminates false-negatives during alert detection.
-
-### Producer Parameters (`producer.py`)
-- `ATTACK_COUNT = 500`: 
-  The volume of concurrent requests injected upon pressing 'Enter'. All 500 events are assigned the exact same `timestamp` to ensure they are aggregated into the same spark window without being split across boundaries.
+Once 	est.ps1 runs:
+1. Observe the live charts floating natively inside your launched browser stream (http://localhost:8501).
+2. Switch back to the newly executed terminal dedicated for producer.py. 
+3. **Press ''Enter''** on your keyboard.
+4. The terminal confirms the deployment via [ATTACK] Injected 500 burst events.
+5. Check your Dashboard—an abnormal visual peak will violently spike above the threshold line rendering the application background aggressively indicating real-time identification.
